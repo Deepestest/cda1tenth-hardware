@@ -24,8 +24,8 @@ float o_speed_scaling_factor = 4.0f;              // Factor to scale the speed c
 // Steering control constants
 const float MAX_STEERING_ANGLE = 45.0f; // degrees
 
-// Car control instance (single motor)
-Car car(CS_RIGHT);
+// Car control instance (two motors)
+Car car(CS_RIGHT, CS_LEFT, CS_STEER);
 
 // Car initialization flags
 bool car_initialized = false;
@@ -51,6 +51,7 @@ void initializeCar()
     delay(100);
 
     car.setSpeed(0.0f); // Start with zero speed
+    car.setMotor2Speed(0.0f);
 
     car_initialized = true;
   }
@@ -75,33 +76,30 @@ void loop()
 {
   if (pestoAgent && car_initialized)
   {
-    car.setSpeed(60.0f);
+    car.setSpeed(100.0f);
+    car.setMotor2Speed(100.0f);
+    car.setMotor3Speed(100.0f);
     // Buttons control the single motor; axes are ignored in this mode
 
     // Decide motor command from PestoLink buttons
     const float wheel_rad_per_sec = 2.0f;
     const float rpm_cmd = wheel_rad_per_sec * 60.0f / (2.0f * M_PI); // rad/s -> rpm
 
-    if (pestoAgent->is_connected())
-    {
-      // Handle connected state
-      Serial.println("PestoLinkAgent: connected");
-    }
-    else
-    {
-      Serial.println("PestoLinkAgent: disconnected");
-    }
+    // Do not use USB Serial; use BLE only. Connection state can be checked if needed.
     if (pestoAgent->get_button(3))
     {
       car.setSpeed(rpm_cmd);
+      car.setMotor2Speed(rpm_cmd);
     }
     else if (pestoAgent->get_button(1))
     {
       car.setSpeed(-rpm_cmd);
+      car.setMotor2Speed(-rpm_cmd);
     }
     else
     {
       car.setSpeed(0.0f);
+      car.setMotor2Speed(0.0f);
     }
 
     // Update control loops

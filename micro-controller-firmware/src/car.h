@@ -48,6 +48,10 @@
 #define DRIVE_STALL_REDUCTION 250
 #define DRIVE_MAX_STALL_COUNT 5
 #define MAX_STEP_ACCEL 200.0f
+// Test max RPM used by setPercent (open-loop test). Adjust if you need higher speed.
+#define TEST_MAX_RPM 120.0f
+
+// (Removed DRIVE_TEST_MAX_STEP_RATE) Use TEST_MAX_RPM to map percent -> rpm -> steps/sec
 
 class Motor
 {
@@ -59,6 +63,7 @@ public:
   // Simplified public API requested by user
   void setSpeed(float rpm);        // For drive motors: rpm
   void setPosition(float radians); // For steering motors: radians (position)
+  void setPercent(float percent);  // Open-loop percent of DRIVE_TEST_MAX_STEP_RATE (-100..100)
   void updateControlloops();       // Run control loop updates
 
   friend class Car; // allow Car to read internal status (keeps Motor API minimal)
@@ -94,13 +99,19 @@ class Car
 {
 public:
   float speed = 0.0f;
-  Motor motor; // single motor configuration
+  Motor motor;  // primary motor
+  Motor motor2; // secondary motor
+  Motor motor3; // tertiary motor
 
-  Car(int motorCS);
+  Car(int motorCS, int motor2CS, int motor3CS);
   void updateControlLoops();
   void begin();
   void setSpeed(float rpm);
+  void setMotor2Speed(float rpm);
+  void setMotor3Speed(float rpm);
   float getMotorRPM();
+  float getMotor2RPM();
+  float getMotor3RPM();
 
 private:
   SemaphoreHandle_t carMutex;

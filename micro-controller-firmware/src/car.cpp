@@ -188,65 +188,78 @@ void Motor::updateControlloops()
 
     if (dt > 0)
     {
-      float measured_ticks_per_sec = (float)delta_enc * 1e6f / dt;
-      float measured_steps_per_sec = measured_ticks_per_sec * (MOTOR_STEPS * MICROSTEPS / ENCODER_TICKS_PER_REVOLUTION);
-      measured_steps_per_sec = abs(measured_steps_per_sec);
+      int32_t current_enc = driver.X_ENC();
+      uint32_t now = micros();
+      uint32_t dt = now - last_time;
+      int32_t delta_enc = current_enc - last_enc;
 
-      current_rpm = (measured_steps_per_sec / (MOTOR_STEPS * MICROSTEPS)) * 60.0f;
+      // Avoid division by zero
+      if (dt > 0)
+      {
+        float measured_ticks_per_sec = (float)delta_enc * 1e6f / dt;
+        float measured_steps_per_sec = measured_ticks_per_sec * (MOTOR_STEPS * MICROSTEPS / ENCODER_TICKS_PER_REVOLUTION);
+        measured_steps_per_sec = abs(measured_steps_per_sec);
 
-      float error = target_steps_per_sec - measured_steps_per_sec;
-      int32_t adjustment = (int32_t)(error * DRIVE_ERROR_GAIN);
+        // Calculate current RPM
+        current_rpm = (measured_steps_per_sec / (MOTOR_STEPS * MICROSTEPS)) * 60.0f;
 
-      if (measured_steps_per_sec < (DRIVE_STALL_THRESHOLD * step_rate_cmd))
-      {
-        stall_counter_drive++;
-      }
-      else
-      {
-        stall_counter_drive = 0;
+        float error = target_steps_per_sec - measured_steps_per_sec;
+        int32_t adjustment = (int32_t)(error * DRIVE_ERROR_GAIN);
+
+        if (measured_steps_per_sec < (DRIVE_STALL_THRESHOLD * step_rate_cmd))
+        {
+          stall_counter_drive++;
+        }
+        else
+        {
+          stall_counter_drive = 0;
+        }
+
+        if (stall_counter_drive > DRIVE_MAX_STALL_COUNT)
+        {
+          step_rate_cmd -= DRIVE_STALL_REDUCTION * stall_counter_drive;
+          if ((int32_t)step_rate_cmd < 0)
+            step_rate_cmd = 0;
+        }
+        else
+        {
+          step_rate_cmd += adjustment;
+          if ((int32_t)step_rate_cmd < 0)
+            step_rate_cmd = 0;
+        }
+
+        // Limit rate of change
+        float max_step_change = MAX_STEP_ACCEL * (dt / 1e6f); // steps/sec
+
+        if (target_steps_per_sec > step_rate_cmd + max_step_change)
+        {
+          step_rate_cmd += max_step_change;
+        }
+        else if (target_steps_per_sec < step_rate_cmd - max_step_change)
+        {
+          step_rate_cmd -= max_step_change;
+        }
+        else
+        {
+          step_rate_cmd = target_steps_per_sec;
+        }
+
+        // Clamp to non-negative
+        if (step_rate_cmd < 0.0f)
+          step_rate_cmd = 0.0f;
+
+        driver.VMAX(step_rate_cmd);
+        driver.shaft(target_rpm < 0);
       }
 
-      if (stall_counter_drive > DRIVE_MAX_STALL_COUNT)
-      {
-        step_rate_cmd -= DRIVE_STALL_REDUCTION * stall_counter_drive;
-        if ((int32_t)step_rate_cmd < 0)
-          step_rate_cmd = 0;
-      }
-      else
-      {
-        step_rate_cmd += adjustment;
-        if ((int32_t)step_rate_cmd < 0)
-          step_rate_cmd = 0;
-      }
-
-      float max_step_change = MAX_STEP_ACCEL * (dt / 1e6f);
-      if (target_steps_per_sec > step_rate_cmd + max_step_change)
-      {
-        step_rate_cmd += max_step_change;
-      }
-      else if (target_steps_per_sec < step_rate_cmd - max_step_change)
-      {
-        step_rate_cmd -= max_step_change;
-      }
-      else
-      {
-        step_rate_cmd = target_steps_per_sec;
-      }
-
-      if (step_rate_cmd < 0.0f)
-        step_rate_cmd = 0.0f;
-
-      driver.VMAX(step_rate_cmd);
-      driver.shaft(target_rpm < 0);
+      last_enc = current_enc;
+      last_time = now;
     }
-
-    last_enc = current_enc;
-    last_time = now;
   }
 }
 
-Car::Car(int motorCS)
-    : motor(motorCS, false)
+Car::Car(int motorCS, int motor2CS, int motor3CS)
+    : motor(motorCS, false), motor2(motor2CS, false), motor3(motor3CS, false)
 {
   carMutex = xSemaphoreCreateMutex();
 }
@@ -265,12 +278,16 @@ void Car::updateControlLoops()
 {
   lock();
   motor.updateControlloops();
+  motor2.updateControlloops();
+  motor3.updateControlloops();
   unlock();
 }
 
 void Car::begin()
 {
   motor.begin();
+  motor2.begin();
+  motor3.begin();
 }
 void Car::setSpeed(float rpm)
 {
@@ -280,10 +297,40 @@ void Car::setSpeed(float rpm)
   unlock();
 }
 
+void Car::setMotor2Speed(float rpm)
+{
+  lock();
+  motor2.setSpeed(rpm);
+  unlock();
+}
+
+void Car::setMotor3Speed(float rpm)
+{
+  lock();
+  motor3.setSpeed(rpm);
+  unlock();
+}
+
 float Car::getMotorRPM()
 {
   lock();
   float rpm = motor.current_rpm;
+  unlock();
+  return rpm;
+}
+
+float Car::getMotor2RPM()
+{
+  lock();
+  float rpm = motor2.current_rpm;
+  unlock();
+  return rpm;
+}
+
+float Car::getMotor3RPM()
+{
+  lock();
+  float rpm = motor3.current_rpm;
   unlock();
   return rpm;
 }
