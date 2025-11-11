@@ -2,8 +2,16 @@
 #include <limits.h>
 #include <math.h>
 
-// Unified Motor implementation: supports both steering and drive behavior
-Motor::Motor(int cs, bool steering) : driver(cs, R_SENSE), cs_pin(cs), isSteering(steering) {}
+// Simple open-loop Motor implementation (no encoder, no steering position)
+// Motor maps rpm -> steps/sec and directly programs the driver VMAX.
+
+#define OPEN_LOOP_VMAX_MULTIPLIER 1.0f
+
+Motor::Motor(int cs)
+    : driver(cs, R_SENSE), cs_pin(cs), step_rate_cmd(0), target_steps_per_sec(0),
+      current_rpm(0.0f), target_rpm(0.0f), percent(0.0f), last_time(0)
+{
+}
 
 void Motor::begin()
 {
@@ -11,97 +19,44 @@ void Motor::begin()
   digitalWrite(cs_pin, HIGH);
   driver.begin();
 
-  if (isSteering)
-  {
-    // Steering configuration (positioning)
-    driver.rms_current(300);
-    driver.ihold(5);
-    driver.irun(50);
-    driver.iholddelay(5);
-    driver.microsteps(MICROSTEPS);
-    driver.en_pwm_mode(false);
-    driver.pwm_autoscale(true);
-    driver.toff(3);
-    driver.blank_time(24);
+  // Basic drive configuration (velocity mode)
+  pinMode(EN_PIN, OUTPUT);
+  digitalWrite(EN_PIN, LOW);
+  driver.shaft(true);
+  driver.rms_current(1000);
+  driver.microsteps(MICROSTEPS);
+  driver.en_pwm_mode(true);
+  driver.pwm_autoscale(true);
+  driver.TCOOLTHRS(0xFFFFF);
+  driver.THIGH(0);
+  driver.semin(5);
+  driver.semax(2);
+  driver.sedn(0b01);
+  driver.toff(3);
+  driver.blank_time(24);
+  driver.ihold(10);
+  driver.irun(31);
+  driver.iholddelay(5);
+  driver.VDCMIN(0);
+  driver.a1(1000);
+  driver.v1(1000);
+  driver.AMAX(1000);
+  driver.DMAX(1000);
+  driver.d1(1000);
+  driver.VSTOP(10);
+  driver.RAMPMODE(2);
 
-    driver.a1(500);
-    driver.v1(500);
-    driver.AMAX(5000);
-    driver.DMAX(5000);
-    driver.VMAX(8000);
-    driver.d1(500);
-    driver.VSTOP(10);
-
-    driver.RAMPMODE(0); // Positioning mode
-    lastCorrectionMicros = micros();
-  }
-  else
-  {
-    // Drive configuration (velocity)
-    pinMode(EN_PIN, OUTPUT);
-    digitalWrite(EN_PIN, LOW);
-    driver.shaft(true);
-    driver.rms_current(1000);
-    driver.microsteps(MICROSTEPS);
-    driver.en_pwm_mode(true);
-    driver.pwm_autoscale(true);
-    driver.TCOOLTHRS(0xFFFFF);
-    driver.THIGH(0);
-    driver.semin(5);
-    driver.semax(2);
-    driver.sedn(0b01);
-    driver.toff(3);
-    driver.blank_time(24);
-    driver.ihold(10);
-    driver.irun(31);
-    driver.iholddelay(5);
-    driver.VDCMIN(0);
-    driver.a1(1000);
-    driver.v1(1000);
-    driver.AMAX(1000);
-    driver.DMAX(1000);
-    driver.d1(1000);
-    driver.VSTOP(10);
-    driver.RAMPMODE(2);
-    driver.X_ENC(0);
-  }
-}
-
-float Motor::normalizeAngle(float angle)
-{
-  while (angle > 180.0f)
-    angle -= DEGREES_PER_REVOLUTION;
-  while (angle < -180.0f)
-    angle += DEGREES_PER_REVOLUTION;
-  return angle;
-}
-
-float Motor::getSteeringSensorAngle()
-{
-  int raw = analogRead(STEERING_SENSOR_PIN);
-  float angle = ((float)raw / STEERING_SENSOR_MAX_VALUE) * DEGREES_PER_REVOLUTION;
-  return angle;
-}
-
-void Motor::setPosition(float radians)
-{
-  // public API requested: setPosition accepts radians (position)
-  if (!isSteering)
-    return;
-
-  float degrees = radians * 180.0f / M_PI;
-  float stepsPerRev = MOTOR_STEPS * MICROSTEPS;
-  float currentAngle = normalizeAngle(getSteeringSensorAngle() - angleOffset);
-  targetAngle = normalizeAngle(-degrees);
-  int32_t actualSteps = (int32_t)((currentAngle / DEGREES_PER_REVOLUTION) * stepsPerRev * STEERING_GEAR_RATIO);
-  driver.XACTUAL(actualSteps);
-  float targetSteps = (targetAngle / DEGREES_PER_REVOLUTION) * stepsPerRev * STEERING_GEAR_RATIO;
-  driver.XTARGET((int32_t)targetSteps);
+  // start with stopped motor
+  step_rate_cmd = 0;
+  target_steps_per_sec = 0;
+  current_rpm = 0.0f;
+  target_rpm = 0.0f;
+  last_time = micros();
 }
 
 bool tmc5160_recover(TMC5160Stepper &drv, int ENN_PIN)
 {
-  // Shared recovery for drive faults
+  // Attempt a simple recovery sequence for UV/CP faults
   digitalWrite(ENN_PIN, HIGH);
   drv.toff(0);
   drv.GSTAT(0b111);
@@ -118,148 +73,54 @@ bool tmc5160_recover(TMC5160Stepper &drv, int ENN_PIN)
 
 void Motor::setSpeed(float rpm)
 {
-  if (isSteering)
-  {
-    // no-op for steering motors (speed controlled by position)
-    return;
-  }
-  target_steps_per_sec = (abs(rpm) / 60.0f) * MOTOR_STEPS * MICROSTEPS;
+  rpm = rpm * 4;
+  // rpm can be positive or negative; we convert magnitude to steps/sec
   target_rpm = rpm;
-
-  // Apply immediately to driver for more responsive behavior during testing.
-  // This forces VMAX to requested value so the motor should start moving toward
-  // the requested speed without waiting for the PID-like ramping logic.
-  step_rate_cmd = target_steps_per_sec;
+  float mag_rpm = fabsf(rpm);
+  target_steps_per_sec = (uint32_t)((mag_rpm / 60.0f) * MOTOR_STEPS * MICROSTEPS);
+  // ensure percent reflects current target for debug
+  if (TEST_MAX_RPM > 0.0f)
+  {
+    percent = (mag_rpm / TEST_MAX_RPM) * 100.0f;
+    if (percent > 100.0f)
+      percent = 100.0f;
+  }
+  // Immediately program the driver for open-loop operation.
+  uint32_t vmax_value = (uint32_t)(target_steps_per_sec * OPEN_LOOP_VMAX_MULTIPLIER);
+  step_rate_cmd = vmax_value;
+  driver.VMAX(vmax_value);
   driver.shaft(target_rpm < 0);
+  // reflect commanded rpm as current in open-loop
+  current_rpm = target_rpm;
+}
+
+void Motor::setPercent(float p)
+{
+  if (p > 100.0f)
+    p = 100.0f;
+  if (p < -100.0f)
+    p = -100.0f;
+  percent = p;
+  // map percent to rpm using TEST_MAX_RPM
+  float rpm = (p / 100.0f) * TEST_MAX_RPM;
+  setSpeed(rpm);
 }
 
 void Motor::updateControlloops()
 {
-  if (isSteering)
-  {
-    // steering update (position correction)
-    uint32_t now = micros();
-    if (now - lastCorrectionMicros < STEERING_CORRECTION_INTERVAL)
-      return;
-    lastCorrectionMicros = now;
-    float currentAngle = normalizeAngle(getSteeringSensorAngle() - angleOffset);
-    float error = normalizeAngle(targetAngle - currentAngle);
-
-    if (fabsf(currentAngle - lastExternalAngle) < SMALL_MOVEMENT_THRESHOLD)
-    {
-      stallCounterSteer++;
-    }
-    else
-    {
-      stallCounterSteer = 0;
-    }
-    lastExternalAngle = currentAngle;
-
-    float stepsPerRev = MOTOR_STEPS * MICROSTEPS;
-    int32_t actualSteps = (int32_t)((currentAngle / 360.0f) * stepsPerRev * STEERING_GEAR_RATIO);
-
-    if (stallCounterSteer > STALL_DETECTION_COUNT)
-    {
-      driver.XACTUAL(actualSteps);
-      driver.XTARGET(actualSteps);
-      stallCounterSteer = 0;
-      return;
-    }
-
-    if (fabsf(error) > STEERING_MAX_ALLOWED_ERROR)
-    {
-      driver.XACTUAL(actualSteps);
-    }
-  }
-  else
-  {
-    // drive update (velocity control)
-    if (driver.GSTAT() & (1 << 2))
-    {
-      if (!tmc5160_recover(driver, EN_PIN))
-      {
-        return;
-      }
-    }
-    int32_t current_enc = driver.X_ENC();
-    uint32_t now = micros();
-    uint32_t dt = now - last_time;
-    int32_t delta_enc = current_enc - last_enc;
-
-    if (dt > 0)
-    {
-      int32_t current_enc = driver.X_ENC();
-      uint32_t now = micros();
-      uint32_t dt = now - last_time;
-      int32_t delta_enc = current_enc - last_enc;
-
-      // Avoid division by zero
-      if (dt > 0)
-      {
-        float measured_ticks_per_sec = (float)delta_enc * 1e6f / dt;
-        float measured_steps_per_sec = measured_ticks_per_sec * (MOTOR_STEPS * MICROSTEPS / ENCODER_TICKS_PER_REVOLUTION);
-        measured_steps_per_sec = abs(measured_steps_per_sec);
-
-        // Calculate current RPM
-        current_rpm = (measured_steps_per_sec / (MOTOR_STEPS * MICROSTEPS)) * 60.0f;
-
-        float error = target_steps_per_sec - measured_steps_per_sec;
-        int32_t adjustment = (int32_t)(error * DRIVE_ERROR_GAIN);
-
-        if (measured_steps_per_sec < (DRIVE_STALL_THRESHOLD * step_rate_cmd))
-        {
-          stall_counter_drive++;
-        }
-        else
-        {
-          stall_counter_drive = 0;
-        }
-
-        if (stall_counter_drive > DRIVE_MAX_STALL_COUNT)
-        {
-          step_rate_cmd -= DRIVE_STALL_REDUCTION * stall_counter_drive;
-          if ((int32_t)step_rate_cmd < 0)
-            step_rate_cmd = 0;
-        }
-        else
-        {
-          step_rate_cmd += adjustment;
-          if ((int32_t)step_rate_cmd < 0)
-            step_rate_cmd = 0;
-        }
-
-        // Limit rate of change
-        float max_step_change = MAX_STEP_ACCEL * (dt / 1e6f); // steps/sec
-
-        if (target_steps_per_sec > step_rate_cmd + max_step_change)
-        {
-          step_rate_cmd += max_step_change;
-        }
-        else if (target_steps_per_sec < step_rate_cmd - max_step_change)
-        {
-          step_rate_cmd -= max_step_change;
-        }
-        else
-        {
-          step_rate_cmd = target_steps_per_sec;
-        }
-
-        // Clamp to non-negative
-        if (step_rate_cmd < 0.0f)
-          step_rate_cmd = 0.0f;
-
-        driver.VMAX(step_rate_cmd);
-        driver.shaft(target_rpm < 0);
-      }
-
-      last_enc = current_enc;
-      last_time = now;
-    }
-  }
+  // No control loop: ensure driver is set to the commanded value.
+  uint32_t vmax_value = (uint32_t)(target_steps_per_sec * OPEN_LOOP_VMAX_MULTIPLIER);
+  step_rate_cmd = vmax_value;
+  driver.VMAX(vmax_value);
+  driver.shaft(target_rpm < 0);
+  // In purely open-loop mode we report the commanded rpm as the current rpm.
+  current_rpm = target_rpm;
+  last_time = micros();
 }
 
+// ----- Car implementation -----
 Car::Car(int motorCS, int motor2CS, int motor3CS)
-    : motor(motorCS, false), motor2(motor2CS, false), motor3(motor3CS, false)
+    : motor(motorCS), motor2(motor2CS), motor3(motor3CS)
 {
   carMutex = xSemaphoreCreateMutex();
 }
@@ -289,6 +150,7 @@ void Car::begin()
   motor2.begin();
   motor3.begin();
 }
+
 void Car::setSpeed(float rpm)
 {
   lock();

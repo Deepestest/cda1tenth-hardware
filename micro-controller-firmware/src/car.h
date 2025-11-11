@@ -28,8 +28,7 @@
 #define STEERING_SENSOR_MAX_VALUE 4095.0f
 #define DEGREES_PER_REVOLUTION 360.0f
 
-// Encoder parameters
-#define ENCODER_TICKS_PER_REVOLUTION 4000.0f
+// Encoder parameters (removed - running open-loop)
 
 // Steering control parameters
 #define STEERING_DEADBAND 0.5f
@@ -57,14 +56,13 @@ class Motor
 {
 public:
   // Constructor and lifecycle
-  Motor(int cs, bool steering = false);
+  Motor(int cs);
   void begin();
 
-  // Simplified public API requested by user
+  // Simplified public API (open-loop)
   void setSpeed(float rpm);        // For drive motors: rpm
-  void setPosition(float radians); // For steering motors: radians (position)
-  void setPercent(float percent);  // Open-loop percent of DRIVE_TEST_MAX_STEP_RATE (-100..100)
-  void updateControlloops();       // Run control loop updates
+  void setPercent(float percent);  // Open-loop percent -100..100 (no encoder)
+  void updateControlloops();       // Run control loop updates (open-loop ramping)
 
   friend class Car; // allow Car to read internal status (keeps Motor API minimal)
 
@@ -72,27 +70,14 @@ private:
   // underlying driver and pins
   TMC5160Stepper driver{0, R_SENSE};
   int cs_pin = -1;
-  bool isSteering = false;
 
-  // Steering-specific internal state
-  float angleOffset = 187.5f;
-  float targetAngle = 0.0f; // degrees
-  uint32_t lastCorrectionMicros = 0;
-  float lastExternalAngle = 0.0f;
-  int stallCounterSteer = 0;
-
-  // Drive-specific internal state
-  uint32_t step_rate_cmd = 0;
-  uint32_t target_steps_per_sec = 0;
-  int32_t last_enc = 0;
-  uint32_t last_time = 0;
-  int stall_counter_drive = 0;
+  // Drive-specific internal state (open-loop - no encoder)
+  uint32_t step_rate_cmd = 0;         // current applied steps/sec
+  uint32_t target_steps_per_sec = 0;  // desired steps/sec
   float current_rpm = 0.0f;
   float target_rpm = 0.0f;
-
-  // internal helpers
-  float normalizeAngle(float angle);
-  float getSteeringSensorAngle();
+  float percent = 0.0f;               // open-loop percent command (-100..100)
+  uint32_t last_time = 0;             // micros() timestamp for ramping
 };
 
 class Car

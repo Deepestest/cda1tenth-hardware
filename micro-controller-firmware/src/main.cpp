@@ -76,9 +76,9 @@ void loop()
 {
   if (pestoAgent && car_initialized)
   {
-    car.setSpeed(100.0f);
-    car.setMotor2Speed(100.0f);
-    car.setMotor3Speed(100.0f);
+    car.setSpeed(10000.0f);
+    car.setMotor2Speed(100000.0f);
+    car.setMotor3Speed(100000.0f);
     // Buttons control the single motor; axes are ignored in this mode
 
     // Decide motor command from PestoLink buttons
