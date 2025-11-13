@@ -22,27 +22,23 @@ void Motor::begin()
   // Basic drive configuration (velocity mode)
   pinMode(EN_PIN, OUTPUT);
   digitalWrite(EN_PIN, LOW);
-  driver.shaft(true);
-  driver.rms_current(1000);
+  driver.rms_current(300);
+  driver.ihold(5);      // Hold torque when idle
+  driver.irun(50);      // Run torque
+  driver.iholddelay(5); // Delay before lowering to hold current
   driver.microsteps(MICROSTEPS);
-  driver.en_pwm_mode(true);
+  driver.en_pwm_mode(false);
   driver.pwm_autoscale(true);
-  driver.TCOOLTHRS(0xFFFFF);
-  driver.THIGH(0);
-  driver.semin(5);
-  driver.semax(2);
-  driver.sedn(0b01);
   driver.toff(3);
   driver.blank_time(24);
-  driver.ihold(10);
-  driver.irun(31);
-  driver.iholddelay(5);
-  driver.VDCMIN(0);
-  driver.a1(1000);
-  driver.v1(1000);
-  driver.AMAX(1000);
-  driver.DMAX(1000);
-  driver.d1(1000);
+
+  // Internal motion profile parameters
+  driver.a1(500);
+  driver.v1(500);
+  driver.AMAX(5000);
+  driver.DMAX(5000);
+  driver.VMAX(8000);
+  driver.d1(500);
   driver.VSTOP(10);
   driver.RAMPMODE(2);
 

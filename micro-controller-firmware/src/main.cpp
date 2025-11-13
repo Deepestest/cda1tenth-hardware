@@ -1,8 +1,5 @@
 #include <Arduino.h>
-#include "PestolinkAgent.h"
 #include <math.h>
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -10,6 +7,9 @@
 
 // Include car control logic
 #include "car.h"
+
+// Include PestoLink BLE remote control
+#include "PestoLink-Receive.h"
 
 #define EXECUTE_EVERY_N_MS_MS_VAR_NAME_CONCAT(inner) inner
 
@@ -31,15 +31,23 @@ Car car(CS_RIGHT, CS_LEFT, CS_STEER);
 bool car_initialized = false;
 
 // PestoLink BLE agent (constructed in setup)
-PestoLinkAgent *pestoAgent = NULL;
 
 // Telemetry timing
 uint32_t lastTelemetryMs = 0;
+// Use the global PestoLink instance declared in PestoLink-Receive.h
+// (do not create a second local instance named `pesto`)
 
 // (Removed micro-ROS callbacks and message/subscription declarations)
 
 void initializeCar()
 {
+  static bool serialStarted = false;
+  if (!serialStarted)
+  {
+    Serial.begin(115200);
+    delay(10);
+    serialStarted = true;
+  }
   if (!car_initialized)
   {
     // Initialize SPI for motor drivers
@@ -61,10 +69,9 @@ void initializeCar()
 
 void setup()
 {
+  PestoLink.begin("Frontloader");
   // Initialize the car control system
   initializeCar();
-  // Construct PestoLinkAgent (BLE remote control)
-  pestoAgent = new PestoLinkAgent("PestoCar");
 }
 
 float angle = 45.00f;
@@ -74,46 +81,60 @@ uint32_t lastApplyMicros = micros();
 
 void loop()
 {
-  if (pestoAgent && car_initialized)
+  PestoLink.update();
+  if (PestoLink.isConnected())
   {
-    car.setSpeed(10000.0f);
-    car.setMotor2Speed(100000.0f);
-    car.setMotor3Speed(100000.0f);
-    // Buttons control the single motor; axes are ignored in this mode
+    char telemetryBuf[32];
+    // Convert float to string (dtostrf: value, min width, precision, buffer)
+    dtostrf(PestoLink.getAxis(0), 6, 3, telemetryBuf);
+    PestoLink.printTelemetry(telemetryBuf);
+    // Read battery voltage and send as telemetry.
+    // Adjust BATT_PIN, ADC_MAX, VREF and VOLTAGE_DIVIDER_RATIO for your hardware.
+    const int BATT_PIN = A0;
+    const float ADC_MAX = 4095.0f;            // use 1023.0f for 10-bit ADC (Arduino UNO), 4095 for 12-bit (ESP32)
+    const float VREF = 3.3f;                  // ADC reference voltage
+    const float VOLTAGE_DIVIDER_RATIO = 2.0f; // set according to your resistor divider
 
-    // Decide motor command from PestoLink buttons
-    const float wheel_rad_per_sec = 2.0f;
-    const float rpm_cmd = wheel_rad_per_sec * 60.0f / (2.0f * M_PI); // rad/s -> rpm
+    int raw = analogRead(BATT_PIN);
+    float batteryVoltage = (raw / ADC_MAX) * VREF * VOLTAGE_DIVIDER_RATIO;
 
-    // Do not use USB Serial; use BLE only. Connection state can be checked if needed.
-    if (pestoAgent->get_button(3))
+    char battBuf[16];
+    dtostrf(batteryVoltage, 5, 2, battBuf); // width 5, 2 decimal places
+    PestoLink.printTelemetry(battBuf);
+  }
+  if (car_initialized)
+  {
+    if (PestoLink.isConnected())
     {
-      car.setSpeed(rpm_cmd);
-      car.setMotor2Speed(rpm_cmd);
-    }
-    else if (pestoAgent->get_button(1))
-    {
-      car.setSpeed(-rpm_cmd);
-      car.setMotor2Speed(-rpm_cmd);
+      float steeringInput = PestoLink.getAxis(1); // Assume axis 1 is steering
+      float speedInput = PestoLink.getAxis(0);    // Assume axis 0 is speed
+
+      // Map steering input (-1 to 1) to steering angle
+      float steeringAngle = 100.0 * steeringInput;
+      // Map speed input (-1 to 1) to speed in rpm
+      float speedRpm = speedInput * 100.0f * o_speed_scaling_factor; // Max 100 rpm scaled
+      float left = speedRpm + (steeringAngle);
+      float right = speedRpm - (steeringAngle);
+      float max = fmaxf(fabsf(left), fabsf(right));
+      if (max > 100.0f)
+      {
+        left = (left / max) * 100.0f;
+        right = (right / max) * 100.0f;
+      }
+
+      car.setSpeed(right);
+      car.setMotor2Speed(left);
+      // For steering, we can use motor3 as the steering motor
     }
     else
     {
-      car.setSpeed(0.0f);
-      car.setMotor2Speed(0.0f);
+      Serial.println("Disconnected");
+      const float speed = 67.0f;
+      car.setSpeed(speed);
+      car.setMotor2Speed(speed);
+      car.setMotor3Speed(speed);
+      car.updateControlLoops();
     }
-
-    // Update control loops
-    car.updateControlLoops();
-
-    // Periodic telemetry over BLE (every 200 ms)
-    uint32_t now = millis();
-    if (now - lastTelemetryMs >= 200)
-    {
-      float motor_rpm = car.getMotorRPM();
-      char buf[32];
-      snprintf(buf, sizeof(buf), "RPM:%d", (int)motor_rpm);
-      pestoAgent->telemetryPrint(String(buf), "00FF00");
-      lastTelemetryMs = now;
-    }
+    delay(10);
   }
 }
